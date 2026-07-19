@@ -39,6 +39,7 @@ class MainWindow : public QMainWindow {
   void loadHistory();
   void loadCodeFiles();
   void openCodeFile(QTreeWidgetItem* item = nullptr);
+  void chooseWorkspace();
   void showToast(const QString& message, bool error = false);
 
   ApiClient api_;
@@ -67,6 +68,7 @@ class MainWindow : public QMainWindow {
   QTextBrowser* agent_chat_{};
   QListWidget* agent_steps_{};
   QTextBrowser* diff_view_{};
+  bool workspace_selected_{false};
 
   QListWidget* history_list_{};
   QLabel* model_health_{};

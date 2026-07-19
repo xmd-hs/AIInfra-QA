@@ -93,7 +93,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), api_(this) {
   refreshOverview();
   loadDocuments();
   loadHistory();
-  loadCodeFiles();
 }
 
 QWidget* MainWindow::buildSidebar() {
@@ -147,7 +146,7 @@ void MainWindow::selectPage(int page) {
     nav_buttons_[i]->style()->polish(nav_buttons_[i]);
   }
   if (page == 1) loadDocuments();
-  if (page == 2) loadCodeFiles();
+  if (page == 2 && !workspace_selected_) QTimer::singleShot(0, this, &MainWindow::chooseWorkspace);
   if (page == 3) loadHistory();
   if (page == 4) refreshOverview();
 }
@@ -248,8 +247,8 @@ QWidget* MainWindow::buildCodePage() {
   auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(24, 24, 24, 24);
   box->addWidget(pageHeader("AGENTIC DEVELOPMENT ENVIRONMENT", "AI Agent 工作台", "项目浏览、代码编辑、任务规划、Agent 对话与 Diff 审核集中在同一个工作区。"));
   auto* picker = new QHBoxLayout; workspace_path_ = new QLineEdit; workspace_path_->setPlaceholderText("本地项目完整路径"); auto* browse = new QPushButton("浏览…"); auto* switcher = new QPushButton("切换目录");
-  connect(browse, &QPushButton::clicked, this, [this]() { const auto dir = QFileDialog::getExistingDirectory(this, "选择代码工作目录", workspace_path_->text()); if (!dir.isEmpty()) workspace_path_->setText(QDir::toNativeSeparators(dir)); });
-  connect(switcher, &QPushButton::clicked, this, [this]() { api_.send("PUT", "/api/code/workspace", QJsonObject{{"root", workspace_path_->text()}}, [this](const QJsonDocument&, const QString& error) { if (!error.isEmpty()) return showToast(error, true); showToast("工作目录已切换"); loadCodeFiles(); }); });
+  connect(browse, &QPushButton::clicked, this, &MainWindow::chooseWorkspace);
+  connect(switcher, &QPushButton::clicked, this, [this]() { api_.send("PUT", "/api/code/workspace", QJsonObject{{"root", workspace_path_->text()}}, [this](const QJsonDocument&, const QString& error) { if (!error.isEmpty()) return showToast(error, true); workspace_selected_ = true; showToast("工作目录已切换"); loadCodeFiles(); }); });
   picker->addWidget(workspace_path_, 1); picker->addWidget(browse); picker->addWidget(switcher); box->addLayout(picker);
 
   auto* split = new QSplitter;
@@ -296,7 +295,19 @@ QWidget* MainWindow::buildCodePage() {
 
 void MainWindow::loadCodeFiles() { if (!code_tree_) return; api_.get("/api/code/files", [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return; const auto object = doc.object(); workspace_path_->setText(object.value("root").toString()); code_tree_->clear(); QMap<QString, QTreeWidgetItem*> folders; for (const auto& value : object.value("files").toArray()) { const QString path = value.toString(); const QStringList parts = path.split('/'); QTreeWidgetItem* parent = nullptr; QString accumulated; for (int i = 0; i < parts.size(); ++i) { accumulated += (accumulated.isEmpty() ? "" : "/") + parts[i]; if (i == parts.size() - 1) { auto* file = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(code_tree_); file->setText(0, parts[i]); file->setData(0, Qt::UserRole, path); } else { if (!folders.contains(accumulated)) { auto* folder = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(code_tree_); folder->setText(0, "▸ " + parts[i]); folders[accumulated] = folder; } parent = folders[accumulated]; } } } code_tree_->expandToDepth(0); }); }
 
-void MainWindow::openCodeFile(QTreeWidgetItem* item) { if (!item) item = code_tree_->currentItem(); if (!item) return; const QString path = item->data(0, Qt::UserRole).toString(); if (path.isEmpty()) { item->setExpanded(!item->isExpanded()); return; } api_.get("/api/code/file?path=" + QString::fromUtf8(QUrl::toPercentEncoding(path)), [this, path](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return showToast(error, true); code_file_name_->setText(path); code_editor_->setPlainText(doc.object().value("content").toString()); code_proposal_->clear(); diff_view_->clear(); agent_steps_->clear(); agent_steps_->addItem("○ 等待任务"); }); }
+void MainWindow::chooseWorkspace() {
+  const QString initial = workspace_path_ && !workspace_path_->text().isEmpty() ? workspace_path_->text() : QDir::homePath();
+  const QString directory = QFileDialog::getExistingDirectory(this, "选择要由 AI Agent 修改的项目", initial, QFileDialog::ShowDirsOnly);
+  if (directory.isEmpty()) return;
+  workspace_path_->setText(QDir::toNativeSeparators(directory));
+  api_.send("PUT", "/api/code/workspace", QJsonObject{{"root", directory}}, [this](const QJsonDocument&, const QString& error) {
+    if (!error.isEmpty()) { workspace_selected_ = false; return showToast(error, true); }
+    workspace_selected_ = true; code_editor_->clear(); code_file_name_->setText("请选择代码文件"); diff_view_->clear();
+    showToast("项目已打开，点击左侧文件即可查看和修改代码"); loadCodeFiles();
+  });
+}
+
+void MainWindow::openCodeFile(QTreeWidgetItem* item) { if (!item) item = code_tree_->currentItem(); if (!item) return; const QString path = item->data(0, Qt::UserRole).toString(); if (path.isEmpty()) { item->setExpanded(!item->isExpanded()); return; } code_file_name_->setText("正在读取 " + path + " …"); code_editor_->clear(); api_.get("/api/code/file?path=" + QString::fromUtf8(QUrl::toPercentEncoding(path)), [this, path](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) { code_file_name_->setText(path); code_editor_->setPlainText("// 读取失败：" + error); return showToast(error, true); } code_file_name_->setText(path); code_editor_->setPlainText(doc.object().value("content").toString()); code_proposal_->clear(); diff_view_->clear(); agent_steps_->clear(); agent_steps_->addItem("○ 等待任务"); showToast("已打开 " + path); }); }
 
 QWidget* MainWindow::buildHistoryPage() { auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(48, 34, 48, 34); box->addWidget(pageHeader("CONVERSATION ARCHIVE", "问答记录", "查看问题、模型、响应时间和回答内容。")); history_list_ = new QListWidget; box->addWidget(history_list_, 1); return page; }
 
