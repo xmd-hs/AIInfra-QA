@@ -8,13 +8,14 @@ intelligent-qa/
 **/__pycache__/
 **/.pytest_cache/
 *.pyc
-python-backend/data/
 frontend/node_modules/
 frontend/dist/
 frontend/.npm-cache/
 frontend/build/
 ai-infra/build*/
 ai-infra/out/
+cpp-backend/build/
+cpp-backend/data/
 .idea/
 .vscode/
 .DS_Store

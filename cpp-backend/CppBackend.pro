@@ -1,0 +1,10 @@
+QT += core network concurrent
+CONFIG += console c++17
+CONFIG -= app_bundle
+TEMPLATE = app
+TARGET = cpp_backend
+QMAKE_CXXFLAGS += /utf-8
+DEFINES += NOMINMAX WIN32_LEAN_AND_MEAN
+SOURCES += main.cpp server.cpp
+HEADERS += server.h
+win32:LIBS += -lwinhttp

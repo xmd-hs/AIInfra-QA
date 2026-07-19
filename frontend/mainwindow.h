@@ -14,6 +14,8 @@ class QPushButton;
 class QStackedWidget;
 class QTextBrowser;
 class QTextEdit;
+class QTreeWidget;
+class QTreeWidgetItem;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
@@ -36,7 +38,7 @@ class MainWindow : public QMainWindow {
   void loadDocuments();
   void loadHistory();
   void loadCodeFiles();
-  void openCodeFile();
+  void openCodeFile(QTreeWidgetItem* item = nullptr);
   void showToast(const QString& message, bool error = false);
 
   ApiClient api_;
@@ -57,11 +59,14 @@ class MainWindow : public QMainWindow {
   QListWidget* document_list_{};
 
   QLineEdit* workspace_path_{};
-  QListWidget* code_files_{};
+  QTreeWidget* code_tree_{};
   QTextEdit* code_editor_{};
   QTextEdit* code_instruction_{};
   QTextEdit* code_proposal_{};
   QLabel* code_file_name_{};
+  QTextBrowser* agent_chat_{};
+  QListWidget* agent_steps_{};
+  QTextBrowser* diff_view_{};
 
   QListWidget* history_list_{};
   QLabel* model_health_{};

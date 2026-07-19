@@ -20,6 +20,7 @@
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
@@ -182,12 +183,12 @@ QWidget* MainWindow::buildChatPage() {
   chat_mode_ = new QComboBox; chat_mode_->addItem("✦ 通用对话", "chat"); chat_mode_->addItem("▦ 知识库问答", "knowledge"); chat_mode_->addItem("◈ 自动模式", "auto");
   tools->addWidget(chat_mode_); tools->addStretch();
   route_group_ = new QButtonGroup(this); route_group_->setExclusive(true);
-  const QStringList routes = {"DeepSeek 直连", "Python 基线", "AI Infra 加速"};
+  const QStringList routes = {"DeepSeek 直连", "C++ 基线", "AI Infra 加速"};
   const QStringList ids = {"direct", "baseline", "infra"};
   for (int i = 0; i < routes.size(); ++i) { auto* b = new QPushButton(routes[i]); b->setCheckable(true); b->setProperty("route", true); b->setProperty("routeId", ids[i]); route_group_->addButton(b); tools->addWidget(b); if (i == 2) b->setChecked(true); }
   shell_box->addWidget(toolbar);
   chat_messages_ = new QTextBrowser; chat_messages_->setObjectName("chat"); shell_box->addWidget(chat_messages_, 1);
-  appendMessage("assistant", "你好，我是知问。你可以选择 DeepSeek 直连、Python 基线或 AI Infra 加速进行问答。", "C++ AI Infra · DeepSeek Chat");
+  appendMessage("assistant", "你好，我是知问。你可以选择 DeepSeek 直连、C++ 基线或 AI Infra 加速进行问答。", "C++ AI Infra · DeepSeek Chat");
   auto* compose = new QWidget; auto* compose_box = new QHBoxLayout(compose);
   chat_input_ = new QTextEdit; chat_input_->setPlaceholderText("向当前模型询问任何问题……"); chat_input_->setMaximumHeight(88);
   send_button_ = new QPushButton("发送 ↑"); send_button_->setProperty("primary", true); send_button_->setMinimumHeight(56);
@@ -244,34 +245,64 @@ QWidget* MainWindow::buildKnowledgePage() {
 void MainWindow::loadDocuments() { if (!document_list_) return; api_.get("/api/documents", [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return; document_list_->clear(); for (const auto& value : doc.object().value("documents").toArray()) { const auto o = value.toObject(); document_list_->addItem(o.value("title").toString() + "\n" + o.value("source").toString()); } refreshOverview(); }); }
 
 QWidget* MainWindow::buildCodePage() {
-  auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(48, 34, 48, 34);
-  box->addWidget(pageHeader("LOCAL CODING AGENT", "代码工作台", "选择本地项目，让 DeepSeek 通过 AI Infra 生成修改建议，确认后再写入文件。"));
+  auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(24, 24, 24, 24);
+  box->addWidget(pageHeader("AGENTIC DEVELOPMENT ENVIRONMENT", "AI Agent 工作台", "项目浏览、代码编辑、任务规划、Agent 对话与 Diff 审核集中在同一个工作区。"));
   auto* picker = new QHBoxLayout; workspace_path_ = new QLineEdit; workspace_path_->setPlaceholderText("本地项目完整路径"); auto* browse = new QPushButton("浏览…"); auto* switcher = new QPushButton("切换目录");
   connect(browse, &QPushButton::clicked, this, [this]() { const auto dir = QFileDialog::getExistingDirectory(this, "选择代码工作目录", workspace_path_->text()); if (!dir.isEmpty()) workspace_path_->setText(QDir::toNativeSeparators(dir)); });
   connect(switcher, &QPushButton::clicked, this, [this]() { api_.send("PUT", "/api/code/workspace", QJsonObject{{"root", workspace_path_->text()}}, [this](const QJsonDocument&, const QString& error) { if (!error.isEmpty()) return showToast(error, true); showToast("工作目录已切换"); loadCodeFiles(); }); });
   picker->addWidget(workspace_path_, 1); picker->addWidget(browse); picker->addWidget(switcher); box->addLayout(picker);
-  auto* split = new QSplitter; code_files_ = new QListWidget; code_files_->setMinimumWidth(280); connect(code_files_, &QListWidget::itemSelectionChanged, this, &MainWindow::openCodeFile);
-  auto* editor_card = card(); auto* editor_box = new QVBoxLayout(editor_card); auto* title_row = new QHBoxLayout; code_file_name_ = label("请选择代码文件"); auto* save = new QPushButton("保存当前文件");
+
+  auto* split = new QSplitter;
+  auto* explorer = card(); auto* explorer_box = new QVBoxLayout(explorer); explorer_box->setContentsMargins(8, 12, 8, 8);
+  explorer_box->addWidget(label("EXPLORER", "eyebrow"));
+  code_tree_ = new QTreeWidget; code_tree_->setHeaderHidden(true); code_tree_->setMinimumWidth(170);
+  connect(code_tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) { openCodeFile(item); });
+  explorer_box->addWidget(code_tree_);
+
+  auto* editor_card = card(); auto* editor_box = new QVBoxLayout(editor_card); editor_box->setContentsMargins(0, 0, 0, 0);
+  auto* title_bar = new QWidget; title_bar->setStyleSheet("background:#eef2ef;border-bottom:1px solid #d9e0dc"); auto* title_row = new QHBoxLayout(title_bar); title_row->setContentsMargins(13, 7, 9, 7);
+  code_file_name_ = label("请选择代码文件"); code_file_name_->setStyleSheet("font-family:Consolas;font-weight:700"); auto* save = new QPushButton("保存");
   connect(save, &QPushButton::clicked, this, [this]() { if (code_file_name_->text().isEmpty()) return; api_.send("PUT", "/api/code/file", QJsonObject{{"path", code_file_name_->text()}, {"content", code_editor_->toPlainText()}}, [this](const QJsonDocument&, const QString& error) { showToast(error.isEmpty() ? "代码已保存" : error, !error.isEmpty()); }); });
-  title_row->addWidget(code_file_name_, 1); title_row->addWidget(save); editor_box->addLayout(title_row);
-  code_editor_ = new QTextEdit; code_editor_->setProperty("code", true); editor_box->addWidget(code_editor_, 1);
-  code_instruction_ = new QTextEdit; code_instruction_->setMaximumHeight(75); code_instruction_->setPlaceholderText("输入修改要求，例如：增加参数校验并保持现有行为"); auto* propose = new QPushButton("让 AI 生成修改"); propose->setProperty("primary", true);
-  connect(propose, &QPushButton::clicked, this, [this]() { QJsonObject body{{"path", code_file_name_->text()}, {"instruction", code_instruction_->toPlainText()}, {"content", code_editor_->toPlainText()}}; api_.send("POST", "/api/code/propose", body, [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return showToast(error, true); code_proposal_->setPlainText(doc.object().value("content").toString()); code_proposal_->show(); showToast("AI 修改建议已生成，确认后再保存"); }); });
-  auto* ai_row = new QHBoxLayout; ai_row->addWidget(code_instruction_, 1); ai_row->addWidget(propose); editor_box->addLayout(ai_row);
-  code_proposal_ = new QTextEdit; code_proposal_->setProperty("code", true); code_proposal_->setPlaceholderText("AI 修改预览"); code_proposal_->setMaximumHeight(240); code_proposal_->hide(); editor_box->addWidget(code_proposal_);
-  auto* apply = new QPushButton("采用预览内容"); connect(apply, &QPushButton::clicked, this, [this]() { if (!code_proposal_->toPlainText().isEmpty()) { code_editor_->setPlainText(code_proposal_->toPlainText()); code_proposal_->hide(); showToast("已采用修改，请点击保存写入磁盘"); } }); editor_box->addWidget(apply);
-  split->addWidget(code_files_); split->addWidget(editor_card); split->setStretchFactor(1, 1); box->addWidget(split, 1); return page;
+  title_row->addWidget(code_file_name_, 1); title_row->addWidget(save); editor_box->addWidget(title_bar);
+  code_editor_ = new QTextEdit; code_editor_->setProperty("code", true); code_editor_->setLineWrapMode(QTextEdit::NoWrap); editor_box->addWidget(code_editor_, 1);
+
+  auto* agent = card(); agent->setMinimumWidth(260); auto* agent_box = new QVBoxLayout(agent); agent_box->setContentsMargins(12, 12, 12, 12);
+  auto* agent_title = new QHBoxLayout; agent_title->addWidget(label("AGENT", "eyebrow")); agent_title->addStretch(); agent_title->addWidget(label("DeepSeek · AI Infra", "muted")); agent_box->addLayout(agent_title);
+  agent_chat_ = new QTextBrowser; agent_chat_->setOpenExternalLinks(false); agent_chat_->setHtml("<b>Agent</b><br><span style='color:#718079'>选择文件并描述任务，我会分析代码、规划步骤并生成可审核的修改。</span>"); agent_chat_->setMaximumHeight(150); agent_box->addWidget(agent_chat_);
+  agent_box->addWidget(label("任务步骤", "muted")); agent_steps_ = new QListWidget; agent_steps_->setMaximumHeight(125); agent_steps_->addItem("○ 等待任务"); agent_box->addWidget(agent_steps_);
+  code_instruction_ = new QTextEdit; code_instruction_->setMaximumHeight(90); code_instruction_->setPlaceholderText("向 Agent 描述任务…\n例如：重构网络请求并补充错误处理"); agent_box->addWidget(code_instruction_);
+  auto* propose = new QPushButton("运行 Agent  ↵"); propose->setProperty("primary", true); agent_box->addWidget(propose);
+  agent_box->addWidget(label("变更 Diff", "muted")); diff_view_ = new QTextBrowser; diff_view_->setStyleSheet("font-family:Consolas;background:#142b25;color:#dfe9e3;border:0"); diff_view_->setPlaceholderText("Agent 生成的代码差异将在这里显示"); agent_box->addWidget(diff_view_, 1);
+  code_proposal_ = new QTextEdit; code_proposal_->hide();
+  auto* actions = new QHBoxLayout; auto* reject = new QPushButton("拒绝"); auto* apply = new QPushButton("应用修改"); apply->setProperty("primary", true); actions->addWidget(reject); actions->addWidget(apply); agent_box->addLayout(actions);
+  connect(reject, &QPushButton::clicked, this, [this]() { code_proposal_->clear(); diff_view_->clear(); agent_steps_->clear(); agent_steps_->addItem("○ 修改已拒绝"); showToast("已拒绝 Agent 修改"); });
+  connect(apply, &QPushButton::clicked, this, [this]() { if (code_proposal_->toPlainText().isEmpty()) return; code_editor_->setPlainText(code_proposal_->toPlainText()); agent_steps_->addItem("✓ 修改已应用到编辑器"); showToast("修改已应用，请保存后写入磁盘"); });
+  connect(propose, &QPushButton::clicked, this, [this, propose]() {
+    if (code_file_name_->text().isEmpty() || code_instruction_->toPlainText().trimmed().isEmpty()) return showToast("请先选择文件并输入任务", true);
+    propose->setEnabled(false); propose->setText("Agent 正在执行…"); agent_steps_->clear(); agent_steps_->addItem("✓ 读取当前文件"); agent_steps_->addItem("● 分析任务与代码上下文"); agent_steps_->addItem("○ 生成修改方案"); agent_steps_->addItem("○ 构建 Diff");
+    agent_chat_->append("<br><b>你</b><br>" + htmlEscape(code_instruction_->toPlainText()));
+    QJsonObject body{{"path", code_file_name_->text()}, {"instruction", code_instruction_->toPlainText()}, {"content", code_editor_->toPlainText()}};
+    api_.send("POST", "/api/code/propose", body, [this, propose](const QJsonDocument& doc, const QString& error) {
+      propose->setEnabled(true); propose->setText("运行 Agent  ↵"); if (!error.isEmpty()) { agent_steps_->addItem("✕ Agent 执行失败"); return showToast(error, true); }
+      const QString before = code_editor_->toPlainText(), after = doc.object().value("content").toString(); code_proposal_->setPlainText(after);
+      agent_steps_->clear(); agent_steps_->addItem("✓ 读取当前文件"); agent_steps_->addItem("✓ 分析任务与代码上下文"); agent_steps_->addItem("✓ 生成修改方案"); agent_steps_->addItem("✓ Diff 等待审核");
+      const QStringList oldLines = before.split('\n'), newLines = after.split('\n'); QString diff = "<pre>"; const int count = qMax(oldLines.size(), newLines.size());
+      for (int i = 0; i < count; ++i) { const QString oldLine = i < oldLines.size() ? oldLines[i] : QString(); const QString newLine = i < newLines.size() ? newLines[i] : QString(); if (oldLine == newLine) { if (!oldLine.trimmed().isEmpty()) diff += "  " + htmlEscape(oldLine) + "\n"; } else { if (i < oldLines.size()) diff += "<span style='color:#ff9b9b'>- " + htmlEscape(oldLine) + "</span>\n"; if (i < newLines.size()) diff += "<span style='color:#b8ef8b'>+ " + htmlEscape(newLine) + "</span>\n"; } } diff += "</pre>"; diff_view_->setHtml(diff);
+      agent_chat_->append("<br><b>Agent</b><br>修改方案已生成。请检查右侧 Diff，然后选择应用或拒绝。"); showToast("Agent 已完成，等待审核");
+    });
+  });
+  split->addWidget(explorer); split->addWidget(editor_card); split->addWidget(agent); split->setSizes({180, 420, 280}); split->setStretchFactor(1, 1); box->addWidget(split, 1); return page;
 }
 
-void MainWindow::loadCodeFiles() { if (!code_files_) return; api_.get("/api/code/files", [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return; const auto object = doc.object(); workspace_path_->setText(object.value("root").toString()); code_files_->clear(); for (const auto& file : object.value("files").toArray()) code_files_->addItem(file.toString()); }); }
+void MainWindow::loadCodeFiles() { if (!code_tree_) return; api_.get("/api/code/files", [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return; const auto object = doc.object(); workspace_path_->setText(object.value("root").toString()); code_tree_->clear(); QMap<QString, QTreeWidgetItem*> folders; for (const auto& value : object.value("files").toArray()) { const QString path = value.toString(); const QStringList parts = path.split('/'); QTreeWidgetItem* parent = nullptr; QString accumulated; for (int i = 0; i < parts.size(); ++i) { accumulated += (accumulated.isEmpty() ? "" : "/") + parts[i]; if (i == parts.size() - 1) { auto* file = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(code_tree_); file->setText(0, parts[i]); file->setData(0, Qt::UserRole, path); } else { if (!folders.contains(accumulated)) { auto* folder = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(code_tree_); folder->setText(0, "▸ " + parts[i]); folders[accumulated] = folder; } parent = folders[accumulated]; } } } code_tree_->expandToDepth(0); }); }
 
-void MainWindow::openCodeFile() { auto* item = code_files_->currentItem(); if (!item) return; const QString path = item->text(); api_.get("/api/code/file?path=" + QString::fromUtf8(QUrl::toPercentEncoding(path)), [this, path](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return showToast(error, true); code_file_name_->setText(path); code_editor_->setPlainText(doc.object().value("content").toString()); code_proposal_->hide(); }); }
+void MainWindow::openCodeFile(QTreeWidgetItem* item) { if (!item) item = code_tree_->currentItem(); if (!item) return; const QString path = item->data(0, Qt::UserRole).toString(); if (path.isEmpty()) { item->setExpanded(!item->isExpanded()); return; } api_.get("/api/code/file?path=" + QString::fromUtf8(QUrl::toPercentEncoding(path)), [this, path](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return showToast(error, true); code_file_name_->setText(path); code_editor_->setPlainText(doc.object().value("content").toString()); code_proposal_->clear(); diff_view_->clear(); agent_steps_->clear(); agent_steps_->addItem("○ 等待任务"); }); }
 
 QWidget* MainWindow::buildHistoryPage() { auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(48, 34, 48, 34); box->addWidget(pageHeader("CONVERSATION ARCHIVE", "问答记录", "查看问题、模型、响应时间和回答内容。")); history_list_ = new QListWidget; box->addWidget(history_list_, 1); return page; }
 
 void MainWindow::loadHistory() { if (!history_list_) return; api_.get("/api/conversations", [this](const QJsonDocument& doc, const QString& error) { if (!error.isEmpty()) return; history_list_->clear(); for (const auto& value : doc.object().value("conversations").toArray()) { const auto o = value.toObject(); const auto timing = o.value("timing").toObject(); history_list_->addItem(QString("%1\n%2 · %3 · %4ms\n%5").arg(o.value("question").toString(), o.value("provider").toString(), o.value("model").toString()).arg(timing.value("totalMs").toDouble()).arg(o.value("answer").toString())); } }); }
 
-QWidget* MainWindow::buildModelPage() { auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(48, 34, 48, 34); box->addWidget(pageHeader("MODEL ORCHESTRATION", "模型与基础设施", "查看 DeepSeek 配置和 C++ AI Infra 运行状态。")); auto* status = card(); auto* status_box = new QVBoxLayout(status); status_box->addWidget(label("C++ AI Infra", "title")); model_health_ = label("正在检查服务状态……", "muted"); status_box->addWidget(model_health_); auto* flow = label("Qt 5.14 客户端  →  FastAPI RAG  →  C++ AI Infra  →  DeepSeek", "stat"); flow->setAlignment(Qt::AlignCenter); status_box->addSpacing(30); status_box->addWidget(flow); status_box->addStretch(); box->addWidget(status, 1); return page; }
+QWidget* MainWindow::buildModelPage() { auto* page = new QWidget; auto* box = new QVBoxLayout(page); box->setContentsMargins(48, 34, 48, 34); box->addWidget(pageHeader("MODEL ORCHESTRATION", "模型与基础设施", "查看 DeepSeek 配置和 C++ AI Infra 运行状态。")); auto* status = card(); auto* status_box = new QVBoxLayout(status); status_box->addWidget(label("C++ AI Infra", "title")); model_health_ = label("正在检查服务状态……", "muted"); status_box->addWidget(model_health_); auto* flow = label("Qt 5.14 客户端  →  C++ Backend RAG  →  C++ AI Infra  →  DeepSeek", "stat"); flow->setAlignment(Qt::AlignCenter); status_box->addSpacing(30); status_box->addWidget(flow); status_box->addStretch(); box->addWidget(status, 1); return page; }
 
 void MainWindow::refreshOverview() {
   api_.get("/api/health", [this](const QJsonDocument& doc, const QString& error) { const auto o = doc.object(); const bool ok = error.isEmpty() && o.value("infraAvailable").toBool(); infra_state_->setText(ok ? "● AI Infra 已连接" : "○ AI Infra 未连接"); if (model_health_) model_health_->setText(ok ? QString("运行正常 · %1 · %2").arg(o.value("model").toString(), o.value("infraUrl").toString()) : "服务未连接：" + error); });
