@@ -1,0 +1,25 @@
+services:
+  ai-infra:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    restart: unless-stopped
+    environment:
+      AIINFRA_PORT: "8080"
+      AIINFRA_UPSTREAM_HOST: ${AIINFRA_UPSTREAM_HOST:-host.docker.internal}
+      AIINFRA_UPSTREAM_PORT: ${AIINFRA_UPSTREAM_PORT:-8000}
+      AIINFRA_UPSTREAM_PATH: /internal/infer
+      AIINFRA_SHARED_SECRET: ${AIINFRA_SHARED_SECRET:-development-only}
+      AIINFRA_MAX_BATCH_SIZE: "16"
+      AIINFRA_MAX_BATCH_TOKENS: "4096"
+      AIINFRA_BATCH_WINDOW_MS: "3"
+      AIINFRA_WORKER_THREADS: "4"
+      AIINFRA_BACKEND_CONCURRENCY: "4"
+      AIINFRA_BACKEND_TIMEOUT_MS: "120000"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

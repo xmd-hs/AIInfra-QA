@@ -1,0 +1,84 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull deepseek-r1:1.5b"]
+    restart: "no"
+
+  ai-infra:
+    build:
+      context: ../ai-infra
+      dockerfile: docker/Dockerfile.cpu
+    restart: unless-stopped
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: "11434"
+      AIINFRA_PORT: "8080"
+      AIINFRA_MAX_BATCH_SIZE: "16"
+      AIINFRA_MAX_BATCH_TOKENS: "4096"
+      AIINFRA_BATCH_WINDOW_MS: "3"
+      AIINFRA_WORKER_THREADS: "4"
+      AIINFRA_BACKEND_CONCURRENCY: "4"
+      AIINFRA_BACKEND_TIMEOUT_MS: "120000"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build:
+      context: ../python-backend
+    restart: unless-stopped
+    depends_on:
+      ai-infra:
+        condition: service_healthy
+    environment:
+      AI_INFRA_BASE_URL: http://ai-infra:8080
+      QA_DATABASE: data/knowledge.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - knowledge-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  frontend:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: http://127.0.0.1:8000
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
+volumes:
+  ollama-data:
+  knowledge-data:
