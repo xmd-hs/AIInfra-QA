@@ -84,6 +84,37 @@ NVIDIA GeForce RTX 4060 Laptop
 
 该数据是 RTX 4060 Laptop 上的本地工程测试结果，不代表所有设备的性能。
 
+### 性能分析
+
+按照同一台机器、同一矩阵规模和同一迭代次数计算：
+
+```text
+CPU latency / CUDA latency = 212.482 / 0.706 ≈ 300.7x
+CUDA throughput / CPU throughput = 47.498 / 0.158 ≈ 300.6x
+```
+
+这组结果说明当前 CUDA Tiled GEMM 已经真正进入 GPU 执行路径，而不是
+CPU fallback。性能提升主要来自：
+
+- 32x32 Shared Memory tiling，减少 Global Memory 重复读取。
+- 线程块并行计算矩阵的 Row/Column tile。
+- 边界条件在 Kernel 内处理，支持非对齐矩阵尺寸。
+- CUDA Runtime 使用独立 device buffer，并在 Kernel 完成后同步取回结果。
+- AutoTuner 根据矩阵工作量选择 Tile 和 Warps 配置。
+
+需要注意：当前 benchmark 包含 Host 到 Device 拷贝、Kernel 执行、同步和
+Device 到 Host 拷贝，不是只测 Kernel 时间。因此它更接近一次完整算子调用
+的端到端延迟。CPU 结果会受到 Windows 电源模式、线程调度和后台负载影响，
+正式对比时应固定功耗模式、预热次数、矩阵布局、数据类型和迭代次数。
+
+建议在其他 GPU 上使用相同命令重新记录数据：
+
+```bash
+gpuforge-bench.exe 128 128 128 5
+gpuforge-bench.exe 256 256 256 5
+gpuforge-bench.exe 512 512 512 5
+```
+
 ## 构建
 
 ### CPU
