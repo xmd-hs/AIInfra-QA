@@ -1,6 +1,7 @@
 #include "gpuforge/tensor.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace gpuforge {
@@ -19,7 +20,11 @@ Tensor::Tensor(std::initializer_list<size_t> shape, DType dtype)
 size_t Tensor::numel() const {
   if (shape_.empty()) return 0;
   size_t result = 1;
-  for (const size_t dimension : shape_) result *= dimension;
+  for (const size_t dimension : shape_) {
+    if (dimension != 0 && result > std::numeric_limits<size_t>::max() / dimension)
+      throw std::length_error("tensor shape element count overflow");
+    result *= dimension;
+  }
   return result;
 }
 

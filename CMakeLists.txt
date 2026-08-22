@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
 project(gpuforge LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared CACHE STRING "CUDA runtime linkage" FORCE)
+if(MSVC)
+  # Keep CUDA and MSVC on the same dynamic CRT to avoid LIBCMT/LNK4098
+  # conflicts when the CUDA object is linked into the static GPUForge library.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 set(KAMA_MEMORY_POOL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(KAMA_MEMORY_POOL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(KAMA_MEMORY_POOL_ENABLE_STATS ON CACHE BOOL "" FORCE)
@@ -16,7 +22,10 @@ if(GPUFORGE_ENABLE_CUDA)
   if(CMAKE_CUDA_COMPILER)
     target_sources(gpuforge PRIVATE cuda/kernels.cu)
     target_compile_definitions(gpuforge PUBLIC GPUFORGE_CUDA=1)
-    set_target_properties(gpuforge PROPERTIES CUDA_STANDARD 17 CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    # Resolve device symbols at the final executable link. Resolving them on
+    # this static library makes MSVC/nvlink treat dependency archives as CUDA
+    # inputs and breaks the Windows build.
+    set_target_properties(gpuforge PROPERTIES CUDA_STANDARD 17 CUDA_SEPARABLE_COMPILATION OFF CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
   endif()
 endif()
 add_executable(gpuforge-bench examples/bench.cpp)

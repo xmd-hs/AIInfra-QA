@@ -22,6 +22,7 @@ class Graph {
   int input(const std::string& name);
   int add(OpKind op, std::vector<int> inputs, const std::string& name);
   void fuse_linear_bias();
+  bool validate(std::string* error = nullptr) const;
   const std::vector<GraphNode>& nodes() const { return nodes_; }
   std::string dump() const;
 

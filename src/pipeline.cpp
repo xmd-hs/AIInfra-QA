@@ -35,6 +35,7 @@ CompileReport CompilePipeline::run(Module& module) {
     report.diagnostics = std::move(errors);
     return report;
   }
+  passes_.constant_fold(module);
   if (layout_) passes_.infer_layout(module);
   passes_.canonicalize(module);
 

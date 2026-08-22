@@ -1,4 +1,6 @@
 #include "gpuforge/kernels.hpp"
+#include "gpuforge/graph.hpp"
+#include "gpuforge/autotune.hpp"
 #include "gpuforge/memory.hpp"
 #include "gpuforge/precision.hpp"
 #include "gpuforge/telemetry.hpp"
@@ -163,6 +165,19 @@ static void randomized_operator_test() {
   for (size_t i = 0; i < attended.numel(); ++i) assert(std::abs(attended.at(i) - 2.0f) < 1e-5f);
 }
 
+static void cuda_consistency_test() {
+  if (!cuda_available()) return;
+  Tensor a({17, 19}), b({19, 13});
+  a.fill(0.25f); b.fill(-0.5f);
+  const Tensor cpu = gemm(a, b), gpu = gemm_cuda(a, b);
+  assert(compare(cpu, gpu).pass(1e-3f));
+  Tensor q({3, 4}), k({5, 4}), v({5, 2});
+  q.fill(0.25f); k.fill(0.5f); v.fill(2.0f);
+  const Tensor attended = attention_cuda(q, k, v, {64, 0.0f, true});
+  assert(attended.shape() == std::vector<size_t>({3, 2}));
+  for (size_t i = 0; i < attended.numel(); ++i) assert(std::abs(attended.at(i) - 2.0f) < 1e-3f);
+}
+
 static void memory_pool_concurrency_test() {
   MemoryPool pool(1 << 20);
   std::vector<std::thread> workers;
@@ -184,6 +199,71 @@ static void memory_pool_concurrency_test() {
   assert(rejected && pool.used() == 1024);
   pool.release(block);
   assert(pool.used() == 0);
+}
+
+static void telemetry_merge_test() {
+  Metrics lhs, rhs;
+  lhs.observe("latency", 2.0);
+  rhs.observe("latency", 4.0);
+  rhs.observe("latency", 6.0);
+  lhs.merge(rhs);
+  const auto summary = lhs.summary("latency");
+  assert(summary.count == 3);
+  assert(std::abs(summary.mean() - 4.0) < 1e-9);
+  assert(summary.min == 2.0 && summary.max == 6.0);
+}
+
+static void edge_contract_test() {
+  using namespace compiler;
+  assert(!infer_matmul({{-1, 4}, ScalarType::F32}, {{4, 4}, ScalarType::F32}).ok);
+  assert(!infer_reshape({{2, 3}, ScalarType::F32}, {-2, 3}).ok);
+  runtime::Scheduler scheduler(0);
+  scheduler.submit({1, 1, 2, 0});
+  assert(scheduler.next().ids.size() == 1);
+  TraceRecorder trace;
+  { ScopedTrace scope(trace, "quoted\\name", "cat\"x"); }
+  assert(trace.chrome_json().find("quoted\\\\name") != std::string::npos);
+  bool overflow_rejected = false;
+  try { Tensor huge({static_cast<size_t>(-1), 2}); }
+  catch (const std::length_error&) { overflow_rejected = true; }
+  assert(overflow_rejected);
+}
+
+static void graph_validation_test() {
+  Graph graph;
+  const int input = graph.input("input");
+  graph.add(OpKind::Gemm, {input}, "gemm");
+  assert(graph.validate());
+  graph.add(OpKind::Softmax, {99}, "bad");
+  std::string error;
+  assert(!graph.validate(&error));
+  assert(error.find("invalid input") != std::string::npos);
+}
+
+static void scheduler_phase_test() {
+  runtime::Scheduler scheduler(4);
+  scheduler.submit({1, 3, 6, 0});
+  scheduler.submit({2, 2, 6, 2});
+  const auto prefill = scheduler.next();
+  assert(prefill.phase == runtime::Phase::Prefill);
+  assert(prefill.ids.size() == 1 && prefill.tokens == 3);
+  scheduler.complete(1, 1);
+  const auto decode = scheduler.next();
+  assert(decode.phase == runtime::Phase::Decode);
+  assert(!decode.ids.empty());
+}
+
+static void autotune_contract_test() {
+  AutoTuneConfig config;
+  config.warmup = 0;
+  config.iterations = 1;
+  GemmAutoTuner tuner(config);
+  bool rejected = false;
+  try {
+    Tensor lhs({1, 3}), rhs({3, 2});
+    tuner.run(lhs, rhs);
+  } catch (const std::invalid_argument&) { rejected = true; }
+  assert(rejected);
 }
 
 static void compiler_validation_test() {
@@ -210,6 +290,46 @@ static void compiler_validation_test() {
   const int p = printable.parameter("x", {{4, 4}, ScalarType::F32, Layout::RowMajor});
   printable.emit(Op::Relu, {p}, {{4, 4}, ScalarType::F32, Layout::RowMajor});
   assert(printable.print().find("relu") != std::string::npos);
+
+  Module algebra;
+  const int x = algebra.parameter("x", {{4, 4}, ScalarType::F32, Layout::RowMajor});
+  const int sum = algebra.emit(Op::Add, {x, x}, {{4, 4}, ScalarType::F32, Layout::RowMajor});
+  PassManager passes;
+  passes.canonicalize(algebra);
+  assert(algebra.node(sum).op == Op::Add);
+
+  Module bad_arity;
+  const int input = bad_arity.parameter("input", {{4, 4}, ScalarType::F32, Layout::RowMajor});
+  bad_arity.emit(Op::Relu, {input, input}, {{4, 4}, ScalarType::F32, Layout::RowMajor});
+  std::vector<std::string> errors;
+  assert(!validate(bad_arity, &errors));
+  assert(!errors.empty());
+
+  Module dce;
+  const int live_input = dce.parameter("live", {{2, 2}, ScalarType::F32, Layout::RowMajor});
+  const int dead_input = dce.parameter("dead", {{2, 2}, ScalarType::F32, Layout::RowMajor});
+  const int live = dce.emit(Op::Relu, {live_input}, {{2, 2}, ScalarType::F32, Layout::RowMajor});
+  dce.emit(Op::Relu, {dead_input}, {{2, 2}, ScalarType::F32, Layout::RowMajor});
+  dce.set_outputs({live});
+  assert(PassManager().dead_code_eliminate(dce) == 2);
+  assert(dce.nodes().size() == 2);
+}
+
+static void constant_folding_test() {
+  using namespace compiler;
+  Module module;
+  const int lhs = module.constant("lhs", {{2}, ScalarType::F32}, {1.0f, -2.0f});
+  const int rhs = module.constant("rhs", {{2}, ScalarType::F32}, {3.0f, 4.0f});
+  const int sum = module.emit(Op::Add, {lhs, rhs}, {{2}, ScalarType::F32});
+  const int relu = module.emit(Op::Relu, {sum}, {{2}, ScalarType::F32});
+  PassManager passes;
+  passes.constant_fold(module);
+  assert(module.node(sum).op == Op::Constant);
+  assert(module.node(sum).constant_data[0] == 4.0f);
+  assert(module.node(sum).constant_data[1] == 2.0f);
+  assert(module.node(relu).op == Op::Constant);
+  assert(module.node(relu).constant_data[0] == 4.0f);
+  assert(module.node(relu).constant_data[1] == 2.0f);
 }
 
 int main() {
@@ -224,5 +344,12 @@ int main() {
   operator_numerics_test();
   randomized_operator_test();
   memory_pool_concurrency_test();
+  telemetry_merge_test();
+  edge_contract_test();
+  cuda_consistency_test();
+  graph_validation_test();
+  scheduler_phase_test();
+  autotune_contract_test();
+  constant_folding_test();
   return 0;
 }

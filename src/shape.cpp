@@ -4,8 +4,12 @@
 
 namespace gpuforge::compiler {
 
+namespace { bool valid_dims(const std::vector<int64_t>& dims) {
+  return std::all_of(dims.begin(), dims.end(), [](int64_t d) { return d >= 0; });
+} }
+
 ShapeResult infer_matmul(const Shape& lhs, const Shape& rhs) {
-  if (lhs.dims.size() != 2 || rhs.dims.size() != 2) {
+  if (lhs.dims.size() != 2 || rhs.dims.size() != 2 || !valid_dims(lhs.dims) || !valid_dims(rhs.dims)) {
     return {false, {}, "matmul expects rank-2 shapes"};
   }
   if (lhs.dims[1] != rhs.dims[0]) {
@@ -15,6 +19,7 @@ ShapeResult infer_matmul(const Shape& lhs, const Shape& rhs) {
 }
 
 ShapeResult infer_broadcast(const Shape& lhs, const Shape& rhs) {
+  if (!valid_dims(lhs.dims) || !valid_dims(rhs.dims)) return {false, {}, "broadcast dimensions must be non-negative"};
   const size_t rank = std::max(lhs.dims.size(), rhs.dims.size());
   std::vector<int64_t> dimensions(rank, 1);
   for (size_t reverse = 0; reverse < rank; ++reverse) {
@@ -33,12 +38,15 @@ ShapeResult infer_broadcast(const Shape& lhs, const Shape& rhs) {
 }
 
 ShapeResult infer_reshape(const Shape& input, const std::vector<int64_t>& dims) {
+  if (!valid_dims(input.dims)) return {false, {}, "input dimensions must be non-negative"};
   size_t known_elements = 1;
   int inferred_axis = -1;
   for (size_t axis = 0; axis < dims.size(); ++axis) {
-    if (dims[axis] < 0) {
+    if (dims[axis] == -1) {
       if (inferred_axis >= 0) return {false, {}, "multiple inferred dimensions"};
       inferred_axis = static_cast<int>(axis);
+    } else if (dims[axis] < 0) {
+      return {false, {}, "reshape dimensions must be non-negative or -1"};
     } else {
       known_elements *= static_cast<size_t>(dims[axis]);
     }
@@ -72,6 +80,28 @@ bool validate(const Module& module, std::vector<std::string>* errors) {
     if (errors) errors->push_back(message);
   };
   for (const Node& node : module.nodes()) {
+    size_t expected_inputs = 0;
+    bool arity_checked = true;
+    switch (node.op) {
+      case Op::Parameter:
+      case Op::Constant: expected_inputs = 0; break;
+      case Op::Relu:
+      case Op::Gelu:
+      case Op::Softmax:
+      case Op::ReduceSum:
+      case Op::Cast:
+      case Op::Reshape: expected_inputs = 1; break;
+      case Op::MatMul:
+      case Op::Add:
+      case Op::Mul: expected_inputs = 2; break;
+      case Op::LayerNorm: expected_inputs = 3; break;
+      default: arity_checked = false; break;
+    }
+    if (arity_checked && node.inputs.size() != expected_inputs) {
+      report("node " + std::to_string(node.id) + " has " +
+             std::to_string(node.inputs.size()) + " inputs; expected " +
+             std::to_string(expected_inputs));
+    }
     for (const int input : node.inputs) {
       if (input < 0 || input >= node.id) {
         report("node " + std::to_string(node.id) + " has invalid input " +

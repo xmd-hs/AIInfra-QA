@@ -27,6 +27,9 @@ TuneResult GemmAutoTuner::run(const Tensor& a, const Tensor& b) {
   BenchmarkSuite suite;
   const auto configs =
       Searcher::gemm_space(a.shape()[0], b.shape()[1], a.shape()[1]);
+  if (configs.empty()) {
+    throw std::invalid_argument("autotune has no valid GEMM configurations");
+  }
   for (const auto& c : configs) {
     suite.add({
         "tile" + std::to_string(c.tile) + "w" + std::to_string(c.warps),

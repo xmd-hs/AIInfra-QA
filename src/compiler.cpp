@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 namespace gpuforge::compiler {
@@ -48,7 +49,9 @@ size_t Shape::elements() const {
   size_t result = 1;
   for (const int64_t dimension : dims) {
     if (dimension < 0) return 0;
-    result *= static_cast<size_t>(dimension);
+    const size_t value = static_cast<size_t>(dimension);
+    if (value != 0 && result > std::numeric_limits<size_t>::max() / value) return 0;
+    result *= value;
   }
   return result;
 }
@@ -74,6 +77,16 @@ int Module::parameter(std::string name, Shape shape) {
 
 int Module::constant(std::string name, Shape shape) {
   return emit(Op::Constant, {}, std::move(shape), {}, std::move(name));
+}
+
+int Module::constant(std::string name, Shape shape, std::vector<float> data) {
+  const int id = constant(std::move(name), std::move(shape));
+  node(id).constant_data = std::move(data);
+  if (!node(id).constant_data.empty() &&
+      node(id).constant_data.size() != node(id).output.shape.elements()) {
+    throw std::invalid_argument("constant payload size mismatch");
+  }
+  return id;
 }
 
 int Module::emit(Op op, std::vector<int> inputs, Shape shape,
@@ -105,6 +118,9 @@ std::vector<int> Module::users(int value_id) const {
   return result;
 }
 
+void Module::set_outputs(std::vector<int> outputs) { outputs_ = std::move(outputs); }
+const std::vector<int>& Module::outputs() const { return outputs_; }
+
 std::string Module::print() const {
   std::ostringstream stream;
   for (const Node& node : nodes_) {
@@ -117,15 +133,36 @@ std::string Module::print() const {
 }
 
 void PassManager::constant_fold(Module& module) {
-  for (const Node& node : module.nodes()) {
-    if (node.op != Op::Add && node.op != Op::Mul) continue;
-    if (node.inputs.size() != 2) continue;
-    const Node& lhs = module.node(node.inputs[0]);
-    const Node& rhs = module.node(node.inputs[1]);
-    if (lhs.op == Op::Constant && rhs.op == Op::Constant) {
-      // The constant payload is intentionally owned by the frontend. This pass
-      // records the fold opportunity without duplicating storage in the IR.
+  for (Node& node : module.mutable_nodes()) {
+    std::vector<float> folded;
+    if (node.op == Op::Add || node.op == Op::Mul) {
+      if (node.inputs.size() != 2) continue;
+      const Node& lhs = module.node(node.inputs[0]);
+      const Node& rhs = module.node(node.inputs[1]);
+      if (lhs.op != Op::Constant || rhs.op != Op::Constant ||
+          lhs.constant_data.empty() || lhs.constant_data.size() != rhs.constant_data.size()) continue;
+      folded.resize(lhs.constant_data.size());
+      for (size_t i = 0; i < folded.size(); ++i)
+        folded[i] = node.op == Op::Add ? lhs.constant_data[i] + rhs.constant_data[i]
+                                       : lhs.constant_data[i] * rhs.constant_data[i];
+    } else if (node.op == Op::Relu || node.op == Op::Gelu || node.op == Op::Cast ||
+               node.op == Op::Reshape) {
+      if (node.inputs.size() != 1) continue;
+      const Node& input = module.node(node.inputs[0]);
+      if (input.op != Op::Constant || input.constant_data.empty()) continue;
+      folded = input.constant_data;
+      if (node.op == Op::Relu) {
+        for (float& value : folded) value = std::max(0.0f, value);
+      } else if (node.op == Op::Gelu) {
+        for (float& value : folded)
+          value = 0.5f * value * (1.0f + std::erf(value / std::sqrt(2.0f)));
+      }
+    } else {
+      continue;
     }
+    node.op = Op::Constant;
+    node.inputs.clear();
+    node.constant_data = std::move(folded);
   }
 }
 
@@ -140,22 +177,43 @@ void PassManager::infer_layout(Module& module) {
 
 void PassManager::canonicalize(Module& module) {
   auto& nodes = module.mutable_nodes();
-  for (Node& node : nodes) {
-    if (node.op == Op::Add && node.inputs.size() == 2 &&
-        node.inputs[0] == node.inputs[1]) {
-      node.op = Op::Mul;
-    }
-  }
+  // Algebraic rewrites must preserve values. x + x is not x * x; without
+  // explicit scalar algebra support, this pass intentionally remains a no-op.
+  (void)nodes;
 }
 
 size_t PassManager::dead_code_eliminate(Module& module) {
-  size_t dead_parameters = 0;
-  for (const Node& node : module.nodes()) {
-    if (node.op == Op::Parameter && module.users(node.id).empty()) {
-      ++dead_parameters;
-    }
+  if (module.outputs().empty()) return 0;  // Conservative when outputs are unspecified.
+  std::vector<bool> live(module.nodes().size(), false);
+  std::vector<int> worklist = module.outputs();
+  while (!worklist.empty()) {
+    const int id = worklist.back();
+    worklist.pop_back();
+    if (id < 0 || static_cast<size_t>(id) >= module.nodes().size() || live[id]) continue;
+    live[id] = true;
+    for (const int input : module.node(id).inputs) worklist.push_back(input);
   }
-  return dead_parameters;
+  size_t removed = 0;
+  auto& nodes = module.mutable_nodes();
+  std::vector<Node> kept;
+  std::vector<int> remap(nodes.size(), -1);
+  kept.reserve(nodes.size());
+  for (const Node& node : nodes) {
+    if (live[node.id]) {
+      remap[node.id] = static_cast<int>(kept.size());
+      kept.push_back(node);
+    } else ++removed;
+  }
+  for (Node& node : kept) {
+    node.id = remap[node.id];
+    node.output.id = node.id;
+    for (int& input : node.inputs) input = remap[input];
+  }
+  nodes = std::move(kept);
+  auto outputs = module.outputs();
+  for (int& output : outputs) output = remap[output];
+  module.set_outputs(std::move(outputs));
+  return removed;
 }
 
 std::vector<FusionGroup> PassManager::fuse(Module& module) const {
@@ -195,17 +253,30 @@ Schedule PassManager::schedule(const Node& node) const {
   return schedule;
 }
 
-std::string PassManager::emit_cuda(const Module&, const FusionGroup& group,
+std::string PassManager::emit_cuda(const Module& module, const FusionGroup& group,
                                    const Schedule& schedule) const {
   std::ostringstream code;
   code << "// generated by GPUForge\n// nodes: ";
   for (const int id : group.nodes) code << id << " ";
   code << "\n// schedule " << schedule.str() << "\n";
+  const Node& node = module.node(group.nodes.front());
+  if (node.op != Op::Relu && node.op != Op::Gelu && node.op != Op::Add &&
+      node.op != Op::Mul) {
+    throw std::invalid_argument("CUDA codegen unsupported operator");
+  }
   code << "extern \"C\" __global__ void " << group.kernel
-       << "(const half* input, half* output) {\n"
-       << "  const int lane = threadIdx.x & 31;\n"
-       << "  if (lane == 0) output[blockIdx.x] = input[blockIdx.x];\n"
-       << "}\n";
+       << "(const float* input, const float* rhs, float* output, int n) {\n"
+       << "  const int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+       << "  if (i >= n) return;\n";
+  if (node.op == Op::Relu)
+    code << "  output[i] = input[i] > 0.0f ? input[i] : 0.0f;\n";
+  else if (node.op == Op::Add)
+    code << "  output[i] = input[i] + rhs[i];\n";
+  else if (node.op == Op::Mul)
+    code << "  output[i] = input[i] * rhs[i];\n";
+  else
+    code << "  output[i] = 0.5f * input[i] * (1.0f + tanhf(0.79788456f * (input[i] + 0.044715f * input[i] * input[i] * input[i])));\n";
+  code << "}\n";
   return code.str();
 }
 

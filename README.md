@@ -1,158 +1,120 @@
 # GPUForge
 
-GPUForge 是一个面向 Transformer 推理的 C++17/CUDA 基础设施原型，重点
-展示三条工程链路：AI 编译器、GPU 算子和推理 Runtime。
+GPUForge 是一个面向大模型训练与推理的 C++17/CUDA AI Infra 性能工程项目，围绕两条主线组织实现：
 
-## 项目定位
+- **Tensor Core 与 GPU 算子优化**：理解 GPU 执行模型、显存层次和矩阵计算路径，编写并选择 CUDA/WMMA Kernel。
+- **编译器式图优化与调度**：从计算图 IR 出发，完成 Shape/Layout 推理、算子融合、代价分析、Tile Schedule 和 Kernel Launch 计划生成。
 
-```text
-计算图 IR
-  -> 校验与 Shape 推导
-  -> Constant Folding / DCE / Fusion
-  -> Tile Planner / Cost Model
-  -> Launch Report / CUDA Codegen
-  -> 算子执行、KV Cache、调度和性能分析
-```
+项目将编译器、算子、显存、推理调度和性能分析组织成一条可运行的工程链路。
 
-项目适合用于学习和展示：
+## 核心模块
 
-- C++ 编译器和 IR 设计。
-- CUDA GEMM、WMMA 和 Attention Kernel。
-- Transformer 推理中的 KV Cache、MemoryPool 和请求调度。
-- CMake、跨平台构建、测试和 Benchmark 工程实践。
+### Tensor Core 与 CUDA Kernel
 
-## 核心实现
+- CPU 参考 Tensor 运行时。
+- Shared Memory Tiled FP32 GEMM。
+- WMMA FP16 输入、FP32 累加 Tensor Core GEMM。
+- 融合 QK-Softmax-V Attention 参考 Kernel。
+- Tile Planner：矩阵维度对齐、padding、grid、shared memory 和 workspace 估算。
+- Tensor Core 合法性检查与数值误差比较工具。
+- 无 CUDA 环境下的 CPU fallback。
 
-### 编译器
+### 编译器与 Kernel 计划
 
-- Typed `Shape`、`Layout`、`Module`、`Node` 和 `Value`。
-- IR 输入引用、算子输入数量和 Shape 合法性校验。
-- MatMul、Broadcast、Reshape、Reduce 的 Shape 推导。
-- Constant Folding，支持常量 Add、Mul、Relu、Gelu、Cast、Reshape。
-- 基于显式 outputs 的 Dead Code Elimination，并自动重映射节点 ID。
-- Fusion Group、Layout Inference、Tile Schedule、Cost Model 和 Launch Report。
-- Elementwise CUDA Kernel 模板生成。
+- `Module`、`Node`、`Value`、`Shape` 组成的计算图 IR。
+- DType、Layout 和 Shape 表达。
+- MatMul、Broadcast、Reshape、Reduce 的 Shape Inference。
+- Canonicalization、Fusion、Dead Code 分析接口。
+- Cost Model、Tile/Warp Schedule 和 Kernel 选择。
+- `CompilePipeline` 生成 LaunchPlan，包括线程数、shared memory 和预估延迟。
+- TuneDatabase 保存 GEMM 调优结果，支持配置复用和文件持久化。
 
-### 算子
+### 推理运行时
 
-CPU 路径位于 `src/kernels.cpp`，CUDA 路径位于 `cuda/kernels.cu`。
+- Paged KV Cache：跨 page 写入、读回、逻辑 offset 到物理 page 索引、容量耗尽检查和 sequence 回收。
+- Prefill/Decode 两阶段请求调度器。
+- Continuous batching 风格的 Batch 规划、请求取消和完成回收。
+- Executor、Stream、TraceRecorder 和 Metrics。
+- BenchmarkSuite 输出延迟、GFLOP/s、GB/s 和 Markdown 表格。
 
-| 算子 | CPU | CUDA |
-|---|---|---|
-| Tiled FP32 GEMM | 支持 | 支持 |
-| WMMA Tensor Core GEMM | fallback | 支持 |
-| Softmax | 支持 | 暂无独立 Kernel |
-| Scaled/Causal Attention | 支持 | 支持 |
-| LayerNorm | 支持 | 暂无独立 Kernel |
+### 内存与通信
 
-### Runtime 与内存
+- `gpuforge::MemoryPool` 是 Kama MemoryPool v3 的兼容适配层。
+- Kama SDK 提供 ThreadCache、CentralCache、PageCache 三级内存池。
+- AllReduce、AllGather、ReduceScatter、Broadcast 通信规划。
+- 通信分块及计算/通信 overlap 规划。
 
-- Paged KV Cache：跨页追加、读取、定位、容量检测和 Sequence 回收。
-- MemoryPool：容量限制、对齐分配、当前池字节统计、所有权跟踪和并发释放。
-- Scheduler：Prefill/Decode 阶段隔离、请求取消和 Batch 生成。
-- Executor、Stream、TraceRecorder、Metrics 和 AutoTune 基础组件。
+## 构建与测试
 
-## 测试与数据
-
-测试环境：
-
-```text
-Windows 10/11
-MSVC 19.44
-CUDA 12.5
-NVIDIA GeForce RTX 4060 Laptop
-```
-
-已验证内容包括：
-
-- CPU Release 构建和 CTest。
-- CUDA Release 构建和 CTest。
-- CPU/CUDA GEMM 数值一致性。
-- 非方形 CPU/CUDA Attention。
-- 随机 GEMM 参考实现比对。
-- Softmax 数值稳定性和 LayerNorm 边界。
-- IR、Shape、DCE、Graph、Scheduler、KV Cache 和 MemoryPool 边界测试。
-
-### GEMM Benchmark
-
-实测配置：`256 x 256 x 256`，5 次迭代。
-
-| 后端 | 平均延迟 | 吞吐 |
-|---|---:|---:|
-| CPU FP32 | 212.482 ms | 0.158 GFLOP/s |
-| CUDA Tiled | 0.706 ms | 47.498 GFLOP/s |
-
-该数据是 RTX 4060 Laptop 上的本地工程测试结果，不代表所有设备的性能。
-
-### 性能分析
-
-按照同一台机器、同一矩阵规模和同一迭代次数计算：
-
-```text
-CPU latency / CUDA latency = 212.482 / 0.706 ≈ 300.7x
-CUDA throughput / CPU throughput = 47.498 / 0.158 ≈ 300.6x
-```
-
-这组结果说明当前 CUDA Tiled GEMM 已经真正进入 GPU 执行路径，而不是
-CPU fallback。性能提升主要来自：
-
-- 32x32 Shared Memory tiling，减少 Global Memory 重复读取。
-- 线程块并行计算矩阵的 Row/Column tile。
-- 边界条件在 Kernel 内处理，支持非对齐矩阵尺寸。
-- CUDA Runtime 使用独立 device buffer，并在 Kernel 完成后同步取回结果。
-- AutoTuner 根据矩阵工作量选择 Tile 和 Warps 配置。
-
-需要注意：当前 benchmark 包含 Host 到 Device 拷贝、Kernel 执行、同步和
-Device 到 Host 拷贝，不是只测 Kernel 时间。因此它更接近一次完整算子调用
-的端到端延迟。CPU 结果会受到 Windows 电源模式、线程调度和后台负载影响，
-正式对比时应固定功耗模式、预热次数、矩阵布局、数据类型和迭代次数。
-
-建议在其他 GPU 上使用相同命令重新记录数据：
+CPU fallback：
 
 ```bash
-gpuforge-bench.exe 128 128 128 5
-gpuforge-bench.exe 256 256 256 5
-gpuforge-bench.exe 512 512 512 5
-```
-
-## 构建
-
-### CPU
-
-```bash
-cmake -S . -B build -DGPUFORGE_ENABLE_CUDA=OFF -DGPUFORGE_BUILD_TESTS=ON
+cmake -S . -B build -DGPUFORGE_ENABLE_CUDA=OFF
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-### CUDA
+CUDA：
 
 ```bash
-cmake -S . -B build-cuda \
-  -DGPUFORGE_ENABLE_CUDA=ON \
-  -DGPUFORGE_BUILD_TESTS=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake -S . -B build-cuda -DGPUFORGE_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
 cmake --build build-cuda --config Release
 ctest --test-dir build-cuda -C Release --output-on-failure
-build-cuda/Release/gpuforge-bench.exe 256 256 256 5
+```
+
+Kama MemoryPool SDK 位于 `vendor_memorypool/v3`，通过 CMake 子目录参与构建。`build/`、`build-cuda/` 等目录均为生成产物。
+
+## 实测数据
+
+已在以下环境完成 CUDA 构建和测试：
+
+- Windows 10
+- Visual Studio 2022 / MSVC 19.44
+- CMake 4.4.2
+- CUDA 12.5
+- NVIDIA GeForce RTX 4060 Laptop
+
+256 x 256 x 256 FP32 GEMM：
+
+```text
+CPU 参考实现：48.5712 ms，0.690829 GFLOP/s
+CUDA Tiled：   0.58876 ms，56.9917 GFLOP/s
+相对 CPU 参考实现：约 82 倍加速
+CTest：1/1 通过
+```
+
+## 测试内容
+
+核心测试覆盖：
+
+- GEMM、Softmax 和数值误差。
+- Paged KV 跨 page append/read、索引定位、容量耗尽和 sequence 回收。
+- Kama MemoryPool 分配与释放。
+- Scheduler 请求提交、取消、Batch 生成和完成回收。
+- Tensor Core 对齐矩阵与非对齐矩阵的 Tile Planner 选择。
+- Compiler Pipeline Launch Report。
+- Trace Event 和 Chrome Trace JSON 导出。
+
+## 项目架构
+
+```text
+计算图 IR
+  -> Shape/Layout 推理
+  -> Canonicalization 与算子融合
+  -> Cost Model 与 Tile Schedule
+  -> Tensor Core / CUDA Tiled Kernel 选择
+  -> LaunchPlan 与 Executor
+  -> Paged KV Cache 与请求调度
+  -> Benchmark、Trace 和 Auto-Tuning Cache
 ```
 
 ## 目录结构
 
 ```text
-include/gpuforge/  公共 C++ 接口
-src/               编译器、CPU 算子、Runtime、内存和 Telemetry
-cuda/              CUDA 与 WMMA Kernel
-tests/             集成和边界测试
-examples/          Benchmark 程序
-benchmarks/        CUDA 数据记录模板
-vendor_memorypool/ Kama MemoryPool v3 依赖
-.github/           Linux CPU、ASan 和 CUDA CI
+include/gpuforge/     C++ 公共接口
+src/                  CPU Runtime、编译器和调度实现
+cuda/                 CUDA Kernel
+examples/             Benchmark 示例
+tests/                集成测试和边界测试
+vendor_memorypool/    Kama MemoryPool SDK
 ```
-
-## 当前边界
-
-GPUForge 当前是可运行的基础设施原型，不是完整生产级推理框架。通用
-MatMul、Attention、LayerNorm 自动 Codegen、独立 CUDA Softmax/LayerNorm、
-NCCL/RDMA 通信和完整图执行器仍需要继续扩展。README 中只记录已经构建、
-测试或实测验证过的能力。

@@ -8,6 +8,14 @@
 namespace gpuforge {
 
 namespace {
+std::string json_escape(const std::string& value) {
+  std::string result;
+  for (const char c : value) {
+    if (c == '\\' || c == '"') result += '\\';
+    result += c;
+  }
+  return result;
+}
 double elapsed_ms(std::chrono::high_resolution_clock::time_point epoch) {
   return std::chrono::duration<double, std::milli>(
              std::chrono::high_resolution_clock::now() - epoch)
@@ -72,8 +80,8 @@ std::string TraceRecorder::chrome_json() const {
   for (size_t i = 0; i < snapshot.size(); ++i) {
     if (i != 0) output << ',';
     const TraceEvent& event = snapshot[i];
-    output << "{\"name\":\"" << event.name << "\",\"cat\":\""
-           << event.cat << "\",\"ph\":\"X\",\"ts\":"
+    output << "{\"name\":\"" << json_escape(event.name) << "\",\"cat\":\""
+           << json_escape(event.cat) << "\",\"ph\":\"X\",\"ts\":"
            << event.start_ms * 1000 << ",\"dur\":" << event.duration_ms * 1000
            << ",\"pid\":1,\"tid\":" << event.tid << '}';
   }
@@ -108,10 +116,21 @@ std::string Metrics::report() const {
 }
 
 void Metrics::merge(const Metrics& other) {
-  const std::string report_text = other.report();
-  (void)report_text;
-  // Metrics are intentionally merged through observe in callers that retain
-  // individual samples; this method remains a synchronization-safe hook.
+  if (this == &other) return;
+  std::map<std::string, MetricSummary> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(other.mu_);
+    snapshot = other.data_;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& [name, incoming] : snapshot) {
+    MetricSummary& current = data_[name];
+    if (incoming.count == 0) continue;
+    current.count += incoming.count;
+    current.sum += incoming.sum;
+    current.min = std::min(current.min, incoming.min);
+    current.max = std::max(current.max, incoming.max);
+  }
 }
 
 ScopedTrace::ScopedTrace(TraceRecorder& recorder, std::string name,

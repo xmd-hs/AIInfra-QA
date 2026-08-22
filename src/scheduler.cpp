@@ -33,10 +33,14 @@ Batch Scheduler::next() {
     active_.push_back(queue_.front());
     queue_.pop_front();
   }
+  if (active_.empty()) return batch;
+  // A batch has one execution contract. Do not mix Prefill and Decode work;
+  // their token shapes and kernel paths are different.
+  batch.phase = active_.front().phase;
   for (const Request& request : active_) {
+    if (request.phase != batch.phase) continue;
     batch.ids.push_back(request.id);
     if (request.phase == Phase::Prefill) {
-      batch.phase = Phase::Prefill;
       batch.tokens += request.prompt;
     } else {
       batch.tokens += 1;

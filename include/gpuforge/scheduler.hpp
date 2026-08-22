@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include <algorithm>
 
 namespace gpuforge::runtime {
 
@@ -27,7 +28,7 @@ struct Batch {
 
 class Scheduler {
  public:
-  explicit Scheduler(size_t max_batch = 8) : max_batch_(max_batch) {}
+  explicit Scheduler(size_t max_batch = 8) : max_batch_(std::max<size_t>(1, max_batch)) {}
 
   void submit(Request);
   void cancel(uint64_t);

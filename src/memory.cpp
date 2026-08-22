@@ -13,7 +13,8 @@ MemoryPool::MemoryPool(size_t n) : capacity_(n) {}
 void* MemoryPool::allocate(size_t n, size_t a) {
   if (n == 0) return nullptr;
   std::lock_guard<std::mutex> g(mu_);
-  if (n > capacity_ - std::min(capacity_, used_bytes_)) throw std::bad_alloc();
+  const size_t available = capacity_ - std::min(capacity_, used_bytes_);
+  if (n > available) throw std::bad_alloc();
   void* p = a > 8 ? Kama_memoryPool::MemoryPool::allocateAligned(n, a)
                   : Kama_memoryPool::MemoryPool::allocate(n);
   if (!p) throw std::bad_alloc();
@@ -46,6 +47,9 @@ double MemoryPool::fragmentation() const {
 
 PagedKV::PagedKV(size_t /*layers*/, size_t t, size_t b, size_t p)
     : page_tokens_(t), page_bytes_(b), pages_(p) {
+  if (t == 0 || b == 0 || p == 0) {
+    throw std::invalid_argument("PagedKV requires non-zero page dimensions");
+  }
   for (auto& x : pages_) {
     x.data.resize(b);
   }
@@ -87,6 +91,9 @@ void PagedKV::release_sequence(size_t s) {
 }
 
 void PagedKV::append(size_t s, const void* d, size_t n) {
+  if (n != 0 && d == nullptr) {
+    throw std::invalid_argument("PagedKV append data is null");
+  }
   std::lock_guard<std::mutex> g(mu_);
   if (s >= sequences_.size()) {
     sequences_.resize(s + 1);
@@ -95,6 +102,23 @@ void PagedKV::append(size_t s, const void* d, size_t n) {
 
   size_t left = n;
   const unsigned char* p = static_cast<const unsigned char*>(d);
+
+  // Preflight capacity so a failed append is atomic and does not leak pages
+  // or leave sequence_bytes_ partially advanced.
+  size_t tail_free = 0;
+  if (!sequences_[s].empty()) {
+    const int tail = sequences_[s].back();
+    tail_free = pages_[tail].write_offset < page_bytes_
+                    ? page_bytes_ - pages_[tail].write_offset
+                    : 0;
+  }
+  size_t free_pages = 0;
+  for (const Page& page : pages_) {
+    if (!page.allocated) ++free_pages;
+  }
+  const size_t needed_pages =
+      left <= tail_free ? 0 : (left - tail_free + page_bytes_ - 1) / page_bytes_;
+  if (needed_pages > free_pages) throw std::bad_alloc();
 
   while (left) {
     int id = sequences_[s].empty() ? -1 : sequences_[s].back();

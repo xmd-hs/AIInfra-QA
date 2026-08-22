@@ -53,12 +53,14 @@ struct Node {
   std::vector<int> inputs;
   Value output;
   std::map<std::string, int64_t> attrs;
+  std::vector<float> constant_data;
 };
 
 class Module {
  public:
   int parameter(std::string, Shape);
   int constant(std::string, Shape);
+  int constant(std::string, Shape, std::vector<float> data);
   int emit(Op,
            std::vector<int>,
            Shape,
@@ -71,10 +73,13 @@ class Module {
   std::vector<Node>& mutable_nodes();
 
   std::vector<int> users(int) const;
+  void set_outputs(std::vector<int> outputs);
+  const std::vector<int>& outputs() const;
   std::string print() const;
 
  private:
   std::vector<Node> nodes_;
+  std::vector<int> outputs_;
 };
 
 struct FusionGroup {
