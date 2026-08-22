@@ -1,0 +1,48 @@
+name: GPUForge CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux-cpu:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - name: Configure
+        run: cmake -S . -B build-ci -G Ninja -DGPUFORGE_ENABLE_CUDA=OFF -DGPUFORGE_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build-ci --parallel
+      - name: Test
+        run: ctest --test-dir build-ci --output-on-failure
+      - name: Benchmark smoke
+        run: ./build-ci/gpuforge-bench
+
+  linux-asan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - name: Configure ASan
+        run: cmake -S . -B build-asan-ci -G Ninja -DGPUFORGE_ENABLE_CUDA=OFF -DGPUFORGE_BUILD_TESTS=ON -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+      - name: Build
+        run: cmake --build build-asan-ci --parallel
+      - name: Test
+        run: ctest --test-dir build-asan-ci --output-on-failure
+
+  cuda-compile:
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cmake ninja-build g++
+      - name: Configure CUDA build
+        run: cmake -S . -B build-cuda-ci -G Ninja -DGPUFORGE_ENABLE_CUDA=ON -DGPUFORGE_BUILD_TESTS=ON -DCMAKE_CUDA_ARCHITECTURES=all-major
+      - name: Compile CUDA path
+        run: cmake --build build-cuda-ci --parallel
+      - name: CUDA compile-time tests
+        run: ctest --test-dir build-cuda-ci --output-on-failure
